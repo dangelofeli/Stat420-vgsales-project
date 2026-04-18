@@ -33,7 +33,7 @@ source(here::here("R", "01_load_clean.R"))
 
 ---
 
-## 1. Load Raw Data
+## Load Raw Data
 
 ```{r load}
 raw <- load_raw()
@@ -42,7 +42,7 @@ glimpse(raw)
 
 ---
 
-## 2. Missing Value Overview
+## Missing Value Overview
 
 ```{r missing-table}
 col_summary(raw) %>%
@@ -68,9 +68,9 @@ col_summary(raw) %>%
 
 ---
 
-## 3. Cleaning Steps
+## Cleaning Steps
 
-### 3a. Remove Missing / Zero Target
+### Remove Missing / Zero Target
 
 We cannot model rows with no `Global_Sales` value.
 
@@ -79,7 +79,7 @@ df <- raw %>% clean_target()
 cat("Rows remaining:", nrow(df), "\n")
 ```
 
-### 3b. Clean Year of Release
+### Clean Year of Release
 
 `Year_of_Release` is stored as character (some entries are `"N/A"`). We coerce to integer and drop implausible values outside 1980–2020.
 
@@ -88,7 +88,7 @@ df <- df %>% clean_year()
 cat("Year range:", range(df$Year_of_Release), "\n")
 ```
 
-### 3c. Filter Valid Genres
+### Filter Valid Genres
 
 Drop rows with missing or unrecognised genre values.
 
@@ -97,7 +97,7 @@ df <- df %>% clean_genre()
 cat("Genres present:", paste(sort(unique(df$Genre)), collapse = ", "), "\n")
 ```
 
-### 3d. Clean User Score
+### Clean User Score
 
 `User_Score` contains `"tbd"` strings where a score hasn't been assigned yet. We replace these with `NA` and convert the column to numeric.
 
@@ -108,7 +108,7 @@ cat("User_Score — NA count after cleaning:",
     sum(is.na(df$User_Score)), "\n")
 ```
 
-### 3e. Standardise ESRB Rating
+### Standardise ESRB Rating
 
 Non-standard ESRB values are collapsed to `"Other"` and missing ratings are labeled `"Unknown"`.
 
@@ -119,7 +119,7 @@ df %>% count(Rating, sort = TRUE) %>% kable()
 
 ---
 
-## 4. Cleaned Dataset Summary
+##Cleaned Dataset Summary
 
 ```{r cleaned-summary}
 cat("Shape after cleaning:", nrow(df), "rows x", ncol(df), "cols\n\n")
@@ -133,15 +133,7 @@ col_summary(df) %>%
 
 ---
 
-## 5. Stopping Point
 
-The dataset is now clean through the missing value handling stage. Remaining steps to complete:
-
-- **Feature engineering** — log-transform of `Global_Sales`, scaling `User_Score` to 0–100, decade variable, platform grouping
-- **EDA** — distributions, genre/platform trends, score vs sales relationships
-- **Regression modeling** — OLS with `Critic_Score`, `User_Score`, `Genre`, `Rating`, `Year_of_Release`
-
-```{r save}
 write_csv(df, here::here("data", "vgsales_clean.csv"))
 cat("Saved: data/vgsales_clean.csv\n")
 ```
