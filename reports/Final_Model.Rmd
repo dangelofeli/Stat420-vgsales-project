@@ -1,0 +1,513 @@
+---
+title: "Video Game Sales Final Model Selection & Analysis"
+author: "Dangelo Feliciano, Anirudh Eswara"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 5,
+  dpi = 150
+)
+```
+
+## Setup
+
+```{r libs}
+library(tidyverse)
+library(knitr)
+library(lmtest)
+library(car)
+
+source(here::here("R", "01_load_clean.R"))
+```
+
+
+## 1. Data Preparation
+
+```{r prep}
+df <- run_pipeline()
+
+df <- df %>%
+  mutate(
+    log_Global_Sales = log1p(Global_Sales),
+    User_Score_100   = User_Score * 10,
+    Genre            = as.factor(Genre),
+    Rating           = if_else(Rating %in% c("E", "E10+", "T", "M"),
+                               as.character(Rating), "Other"),
+    Rating           = factor(Rating, levels = c("E", "E10+", "T", "M", "Other"))
+  )
+
+model_df <- df %>%
+  filter(
+    !is.na(Critic_Score),
+    !is.na(User_Score_100),
+    !is.na(Rating)
+  )
+
+# Folds defined once, used for all CV comparisons
+set.seed(42)
+folds <- sample(rep(1:10, length.out = nrow(model_df)))
+
+cat("Modeling dataset:", nrow(model_df), "rows\n")
+cat("Reference level — Genre:", levels(model_df$Genre)[1], "\n")
+cat("Reference level — Rating:", levels(model_df$Rating)[1], "\n")
+```
+
+---
+
+## 2. Path from Initial Model to Final Model
+
+This section shows only the models and comparisons that led to the final model.
+Dead-end attempts are noted briefly but not shown in detail.
+
+### 2a. Full Model (Baseline)
+
+Our starting point includes all theoretically relevant predictors.
+
+```{r full-model}
+full_model <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+
+summary(full_model)
+```
+
+```{r cv-full}
+rmse_cv <- function(formula, data, folds) {
+  rmse <- numeric(10)
+  for (k in 1:10) {
+    train <- data[folds != k, ]
+    test  <- data[folds == k, ]
+    fit   <- lm(formula, data = train)
+    pred  <- predict(fit, newdata = test)
+    rmse[k] <- sqrt(mean((test$log_Global_Sales - pred)^2))
+  }
+  mean(rmse)
+}
+
+rmse_full <- rmse_cv(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  model_df, folds
+)
+cat("Baseline CV RMSE:", round(rmse_full, 4), "\n")
+```
+
+### 2b. Stepwise AIC, Did Not Improve
+
+AIC based stepwise selection was applied but did not remove any predictors, confirming
+all variables in the full model contribute meaningfully. The AIC and CV RMSE were
+essentially unchanged, so we do not pursue this path further.
+
+```{r stepwise, results='hide'}
+step_model <- step(full_model, direction = "both", trace = 0)
+```
+
+```{r stepwise-compare}
+cat("Full model AIC: ", round(AIC(full_model),  2), "\n")
+cat("Step model AIC: ", round(AIC(step_model),  2), "\n")
+cat("Variables removed by stepwise:", 
+    setdiff(names(coef(full_model)), names(coef(step_model))), "\n")
+```
+
+### 2c. Critic Score × User Score Interaction — Did Not Improve
+
+We tested whether critic and user scores jointly predict sales beyond their individual
+effects. The interaction term was not significant and did not improve CV RMSE, so we
+do not pursue this further.
+
+```{r int-scores}
+model_int_scores <- lm(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+rmse_int_scores <- rmse_cv(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  model_df, folds
+)
+cat("CV RMSE — Critic × User Score:", round(rmse_int_scores, 4), "\n")
+cat("AIC    — Critic × User Score:", round(AIC(model_int_scores), 2), "\n")
+```
+
+### 2d. Polynomial Year Meaningful Improvement
+
+The video game industry grew rapidly through the 2000s and declined after ~2008.
+A quadratic term for `Year_of_Release` captures this curve better than a linear term.
+
+```{r poly-year}
+model_poly <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating,
+  data = model_df
+)
+
+summary(model_poly)
+
+rmse_poly <- rmse_cv(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating,
+  model_df, folds
+)
+cat("CV RMSE — Polynomial Year:", round(rmse_poly, 4), "\n")
+cat("AIC    — Polynomial Year:", round(AIC(model_poly), 2), "\n")
+```
+
+```{r poly-anova}
+# F-test: does the quadratic term significantly improve over linear?
+anova(full_model, model_poly)
+```
+
+> The ANOVA F-test confirms whether the quadratic term is a statistically significant
+> improvement over the linear year term.
+
+### 2e. Critic Score × Genre Interaction — Best Improvement
+
+This directly addresses our research question: does the relationship between critic scores
+and global sales vary by genre? We test this with an interaction term.
+
+```{r int-genre}
+model_int_genre <- lm(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating,
+  data = model_df
+)
+
+summary(model_int_genre)
+
+rmse_int_genre <- rmse_cv(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating,
+  model_df, folds
+)
+cat("CV RMSE — Critic × Genre + Poly Year:", round(rmse_int_genre, 4), "\n")
+cat("AIC    — Critic × Genre + Poly Year:", round(AIC(model_int_genre), 2), "\n")
+```
+
+```{r int-genre-anova}
+# F-test: does the interaction significantly improve over the polynomial model?
+anova(model_poly, model_int_genre)
+```
+
+---
+
+## 3. Model Comparison Summary
+
+```{r comparison-table}
+comparison <- data.frame(
+  Model = c(
+    "Full Model (Baseline)",
+    "Stepwise AIC",
+    "Critic × User Score Interaction",
+    "Polynomial Year (degree 2)",
+    "Critic × Genre + Polynomial Year (Final)"
+  ),
+  AIC = round(c(
+    AIC(full_model),
+    AIC(step_model),
+    AIC(model_int_scores),
+    AIC(model_poly),
+    AIC(model_int_genre)
+  ), 2),
+  CV_RMSE = round(c(
+    rmse_full,
+    rmse_cv(formula(step_model), model_df, folds),
+    rmse_int_scores,
+    rmse_poly,
+    rmse_int_genre
+  ), 4),
+  Adj_R2 = round(c(
+    summary(full_model)$adj.r.squared,
+    summary(step_model)$adj.r.squared,
+    summary(model_int_scores)$adj.r.squared,
+    summary(model_poly)$adj.r.squared,
+    summary(model_int_genre)$adj.r.squared
+  ), 4)
+)
+
+kable(comparison, caption = "Model Comparison — Lower AIC and CV RMSE = Better")
+```
+
+> **Selected Final Model:** `Critic_Score × Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating`
+>
+> This model achieves the lowest AIC and CV RMSE of all candidates, and both the
+> polynomial year term and the Genre interaction were confirmed significant by F-tests.
+
+---
+
+## 4. Final Model In-Depth Analysis
+
+```{r final-model}
+final_model <- model_int_genre
+```
+
+### 4a. Full Summary
+
+```{r final-summary}
+summary(final_model)
+```
+
+### 4b. Coefficient Interpretation
+
+```{r coef-table}
+coef_df <- as.data.frame(summary(final_model)$coefficients)
+coef_df <- round(coef_df, 5)
+coef_df$Significant <- ifelse(coef_df[, 4] < 0.05, "***", "")
+kable(coef_df, caption = "Final Model Coefficients")
+```
+
+**Key interpretations (all on the log scale):**
+
+- **`Critic_Score`** (baseline genre = Action): Each 1-point increase in critic score is associated with an increase in log(Global Sales), holding all else constant. Because this is a log transformed response, the effect is multiplicative on the original sales scale.
+- **`User_Score_100`**: Controls for user sentiment independently of critic scores.
+- **`poly(Year_of_Release, 2)`**: The quadratic term captures the industry's rise and decline, sales peaked around the mid 2000s.
+- **`Genre` main effects**: The intercept shift for each genre relative to Action, before accounting for how scores interact with genre.
+- **`Critic_Score:Genre` interactions**: How much the slope of critic score on log(sales) changes for each genre relative to Action. A positive interaction means critic scores matter *more* in that genre; negative means they matter *less*.
+- **`Rating`**: Relative to the E (Everyone) baseline, captures how target audience affects expected sales.
+
+### 4c. Visualizing the Critic Score × Genre Interaction
+
+```{r interaction-plot, fig.height=7}
+pred_grid <- expand.grid(
+  Critic_Score    = seq(20, 98, by = 2),
+  Genre           = levels(model_df$Genre),
+  User_Score_100  = mean(model_df$User_Score_100, na.rm = TRUE),
+  Year_of_Release = median(model_df$Year_of_Release),
+  Rating          = "E"
+)
+
+pred_grid$predicted <- predict(final_model, newdata = pred_grid)
+
+ggplot(pred_grid, aes(x = Critic_Score, y = predicted, color = Genre)) +
+  geom_line(linewidth = 0.9) +
+  scale_color_brewer(palette = "Set3") +
+  labs(
+    title    = "Predicted log(Global Sales) vs Critic Score by Genre",
+    subtitle = "Holding User Score, Year, and Rating at median/reference values",
+    x        = "Critic Score (0–100)",
+    y        = "Predicted log1p(Global Sales)",
+    color    = "Genre"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+> Genres where the slope is steeper benefit more from high critic scores, meaning
+> critical acclaim is a stronger predictor of sales in those genres.
+
+### 4d. Genre Effect Plot
+
+```{r genre-effect, fig.height=5}
+genre_coefs <- as.data.frame(summary(final_model)$coefficients)
+genre_coefs$term <- rownames(genre_coefs)
+
+genre_main <- genre_coefs %>%
+  filter(grepl("^Genre", term), !grepl(":", term)) %>%
+  mutate(
+    Genre = gsub("Genre", "", term),
+    lower = Estimate - 1.96 * `Std. Error`,
+    upper = Estimate + 1.96 * `Std. Error`,
+    sig   = `Pr(>|t|)` < 0.05
+  )
+
+ggplot(genre_main, aes(x = Estimate, y = reorder(Genre, Estimate),
+                        color = sig, xmin = lower, xmax = upper)) +
+  geom_pointrange() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  scale_color_manual(values = c("FALSE" = "grey70", "TRUE" = "steelblue"),
+                     labels = c("p ≥ 0.05", "p < 0.05")) +
+  labs(
+    title    = "Genre Main Effects on log(Global Sales)",
+    subtitle = "Relative to baseline genre: Action",
+    x        = "Coefficient (95% CI)",
+    y        = NULL,
+    color    = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+### 4e. Year Effect (Quadratic)
+
+```{r year-effect, fig.height=4}
+year_grid <- data.frame(
+  Year_of_Release = seq(1985, 2016),
+  Critic_Score    = mean(model_df$Critic_Score, na.rm = TRUE),
+  User_Score_100  = mean(model_df$User_Score_100, na.rm = TRUE),
+  Genre           = "Action",
+  Rating          = "E"
+)
+
+year_grid$predicted <- predict(final_model, newdata = year_grid)
+
+ggplot(year_grid, aes(x = Year_of_Release, y = predicted)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  labs(
+    title    = "Predicted log(Global Sales) by Year of Release",
+    subtitle = "Holding all other predictors at mean/reference values",
+    x        = "Year of Release",
+    y        = "Predicted log1p(Global Sales)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+### 4f. Actual vs Predicted
+
+```{r actual-pred, fig.height=5}
+model_df$fitted_final    <- fitted(final_model)
+model_df$resid_final     <- resid(final_model)
+
+ggplot(model_df, aes(x = fitted_final, y = log_Global_Sales)) +
+  geom_point(alpha = 0.2, size = 0.7, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0,
+              color = "tomato", linewidth = 1, linetype = "dashed") +
+  labs(
+    title    = "Actual vs Predicted — Final Model",
+    subtitle = "Dashed line = perfect prediction",
+    x        = "Predicted log1p(Global Sales)",
+    y        = "Actual log1p(Global Sales)"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+
+## 5. Diagnostic Plots
+
+```{r diagnostics, fig.width=11, fig.height=8}
+par(mfrow = c(2, 2))
+plot(final_model, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
+
+### 5a. Breusch-Pagan Test (Homoscedasticity)
+
+```{r bp-test}
+bptest(final_model)
+```
+
+### 5b. Residual Histogram
+
+```{r resid-hist, fig.height=4}
+hist(resid(final_model),
+     main   = "Histogram of Residuals — Final Model",
+     xlab   = "Residuals",
+     col    = "steelblue",
+     border = "white",
+     breaks = 35)
+```
+
+### 5c. VIF (Multicollinearity)
+
+```{r vif}
+vif(final_model, type = "predictor") %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Predictor") %>%
+  arrange(desc(GVIF)) %>%
+  kable(digits = 3, caption = "Variance Inflation Factors — Final Model")
+```
+
+> **Note on VIF for `Year_of_Release`:** The astronomically large VIF for `poly(Year_of_Release, 2)` 
+> is a known artifact of how `car::vif()` interacts with `poly()` terms — it does **not** indicate 
+> real multicollinearity. The `poly()` function creates orthogonal polynomials which are by 
+> construction uncorrelated, so this result should be disregarded. To verify, the VIF for 
+> `Critic_Score`, `User_Score_100`, and `Rating` are all well below 10, indicating no 
+> problematic multicollinearity among the main predictors.
+
+**Diagnostic Summary:**
+
+- **Linearity:** Residuals vs Fitted should show no systematic pattern around zero.
+- **Normality:** The Q-Q plot and histogram assess whether residuals are approximately normal.
+- **Homoscedasticity:** The BP test p-value determines if variance is constant across fitted values. Even after log transforming the response, some heteroscedasticity is common in sales data due to blockbuster outliers.
+- **Influential observations:** Cook's Distance (plot 4) identifies high-influence points that disproportionately affect the fit.
+
+
+## 6. Statistical Tests Summary
+
+```{r tests-summary}
+tests <- data.frame(
+  Test = c(
+    "F-test: Full Model overall significance",
+    "ANOVA: Full vs Polynomial Year",
+    "ANOVA: Polynomial Year vs Final (+ Genre interaction)",
+    "Breusch-Pagan: Homoscedasticity"
+  ),
+  Result = c(
+    paste0("F = ", round(summary(full_model)$fstatistic[1], 2),
+           ", p < 0.001"),
+    paste0("F = ", round(anova(full_model, model_poly)$F[2], 2),
+           ", p = ", round(anova(full_model, model_poly)[2, 6], 4)),
+    paste0("F = ", round(anova(model_poly, model_int_genre)$F[2], 2),
+           ", p = ", round(anova(model_poly, model_int_genre)[2, 6], 4)),
+    paste0("BP = ", round(bptest(final_model)$statistic, 2),
+           ", p = ", round(bptest(final_model)$p.value, 4))
+  )
+)
+
+kable(tests, caption = "Statistical Tests Used in Model Selection and Evaluation")
+```
+
+## 7. Final Model Performance
+
+```{r performance}
+perf <- data.frame(
+  Metric = c(
+    "R-squared",
+    "Adjusted R-squared",
+    "Residual Standard Error",
+    "10-Fold CV RMSE (log scale)",
+    "AIC"
+  ),
+  Value = c(
+    round(summary(final_model)$r.squared,     4),
+    round(summary(final_model)$adj.r.squared, 4),
+    round(summary(final_model)$sigma,         4),
+    round(rmse_int_genre,                     4),
+    round(AIC(final_model),                   2)
+  )
+)
+
+kable(perf, caption = "Final Model Performance Metrics")
+```
+
+
+## 8. Optional: Alternative Model
+
+A simpler alternative model worth considering is the **polynomial year model without the Genre interaction** (`model_poly`). While it has a slightly higher AIC and CV RMSE than the final model, it is considerably more interpretable, each coefficient has a clean, direct interpretation without needing to account for interaction slopes.
+
+```{r alt-model}
+cat("Final Model  — Adj R²:", round(summary(final_model)$adj.r.squared, 4),
+    " | CV RMSE:", round(rmse_int_genre, 4),
+    " | AIC:", round(AIC(final_model), 2), "\n")
+
+cat("Alt Model    — Adj R²:", round(summary(model_poly)$adj.r.squared, 4),
+    " | CV RMSE:", round(rmse_poly, 4),
+    " | AIC:", round(AIC(model_poly), 2), "\n")
+```
+
+> If the goal is **prediction accuracy**, the final model with the Genre interaction is preferred.
+> If the goal is **interpretability and simplicity**, the polynomial year model is a strong alternative.
+
+
+## 9. Conclusions
+
+```{r conclusions-coefs}
+# Pull out the key numeric predictors for easy discussion
+main_coefs <- as.data.frame(summary(final_model)$coefficients)
+main_coefs <- main_coefs[c("Critic_Score", "User_Score_100"), ]
+kable(round(main_coefs, 5), caption = "Key Numeric Predictor Coefficients")
+```
+
+**Summary of findings:**
+
+- **Critic Score** is a statistically significant positive predictor of log(Global Sales). Each additional point is associated with a measurable increase in expected sales, though the strength of this relationship varies significantly by genre (as shown by the interaction terms).
+- **User Score** has a statistically significant but **negative** coefficient (-0.00311) after controlling for critic scores. This is a notable finding — it suggests that once critic acclaim is accounted for, higher user scores are actually associated with slightly lower sales. This likely reflects multicollinearity between the two scores: games with high critic scores tend to also have high user scores, so after controlling for critic scores, user score picks up a residual "contrarian" signal. It may also reflect that highly commercial blockbusters (high sales) sometimes receive lower user scores due to franchise fatigue or review bombing, despite strong critic reception.
+- **Year of Release** has a nonlinear (quadratic) relationship with sales, reflecting the industry's growth through the 2000s and decline post-2008.
+- **Genre** matters both as a main effect (different baseline sales levels) and through its interaction with critic scores (some genres are more sensitive to critical reception than others).
+- **ESRB Rating** is a significant predictor, with M and E rated games tending to outperform other ratings after controlling for other predictors.
+- The final model explains approximately `r round(summary(final_model)$adj.r.squared * 100, 1)`% of variance in log(Global Sales), with a 10-fold CV RMSE of `r round(rmse_int_genre, 4)` on the log scale. While an R² of ~19% may seem low, this is expected for sales data, global sales are influenced by many factors outside this dataset such as marketing budgets, franchise popularity, platform install base, release timing, and regional cultural preferences. The model captures the statistically meaningful signal that exists within the available predictors, and the highly significant F-statistic (p < 2.2e-16) confirms the model as a whole is far better than a null model.

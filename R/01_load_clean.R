@@ -1,3 +1,7 @@
+# =============================================================================
+# 01_load_clean.R
+# Data loading and missing value handling for the Video Game Sales analysis.
+# =============================================================================
 
 library(tidyverse)
 library(janitor)
@@ -24,7 +28,7 @@ load_raw <- function(path = DATA_PATH) {
     col_types = cols(
       Name             = col_character(),
       Platform         = col_character(),
-      Year_of_Release  = col_character(),   # read as char; coerce later
+      Year_of_Release  = col_character(),
       Genre            = col_character(),
       Publisher        = col_character(),
       NA_Sales         = col_double(),
@@ -34,7 +38,7 @@ load_raw <- function(path = DATA_PATH) {
       Global_Sales     = col_double(),
       Critic_Score     = col_double(),
       Critic_Count     = col_double(),
-      User_Score       = col_character(),   # contains "tbd"
+      User_Score       = col_character(),
       User_Count       = col_double(),
       Developer        = col_character(),
       Rating           = col_character()
@@ -61,7 +65,6 @@ col_summary <- function(df) {
 
 # ── Cleaning steps ------------------------------------------------------------
 
-# Remove rows where Global_Sales is missing or zero (can't model without a target)
 clean_target <- function(df, target = "Global_Sales") {
   before <- nrow(df)
   df <- df %>% filter(!is.na(.data[[target]]), .data[[target]] > 0)
@@ -70,7 +73,6 @@ clean_target <- function(df, target = "Global_Sales") {
   df
 }
 
-# Coerce Year_of_Release to integer; drop implausible values
 clean_year <- function(df) {
   before <- nrow(df)
   df <- df %>%
@@ -80,7 +82,6 @@ clean_year <- function(df) {
   df
 }
 
-# Drop rows with unrecognised or missing genres
 clean_genre <- function(df) {
   before <- nrow(df)
   df <- df %>% filter(Genre %in% KNOWN_GENRES)
@@ -88,7 +89,6 @@ clean_genre <- function(df) {
   df
 }
 
-# Coerce User_Score: replace "tbd" with NA, convert to numeric
 clean_user_score <- function(df) {
   df %>%
     mutate(
@@ -97,7 +97,6 @@ clean_user_score <- function(df) {
     )
 }
 
-# Standardise ESRB Rating: collapse rare values to "Other", fill NA as "Unknown"
 clean_rating <- function(df) {
   df %>%
     mutate(
@@ -108,13 +107,8 @@ clean_rating <- function(df) {
 }
 
 
-# ── Pipeline (stops after missing value handling) ----------------------------
+# ── Master pipeline -----------------------------------------------------------
 
-#' Load and clean the dataset through the missing value stage.
-#' Feature engineering to be added in session.
-#'
-#' @param path Path to raw CSV.
-#' @return Cleaned tibble with missing values handled.
 run_pipeline <- function(path = DATA_PATH) {
   load_raw(path) %>%
     clean_target() %>%
