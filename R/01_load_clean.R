@@ -1,8 +1,3 @@
-# =============================================================================
-# 01_load_clean.R
-# Data loading and missing value handling for the Video Game Sales analysis.
-# Feature engineering and modeling to be completed in session.
-# =============================================================================
 
 library(tidyverse)
 library(janitor)

@@ -1,0 +1,437 @@
+---
+title: "Video Game Sales — Modeling"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 5,
+  dpi = 150
+)
+```
+
+## Setup
+
+```{r libs}
+library(tidyverse)
+library(knitr)
+library(lmtest)
+
+source(here::here("R", "01_load_clean.R"))
+```
+
+---
+
+## 1. Prepare Modeling Data
+
+We apply a `log1p()` transformation to `Global_Sales` to address right-skew before modeling.
+We also scale `User_Score` from 0–10 to 0–100 to match `Critic_Score`.
+Rows missing any key predictor are dropped (complete-case analysis).
+
+```{r prep}
+df <- run_pipeline()
+
+# Feature engineering
+df <- df %>%
+  mutate(
+    log_Global_Sales = log1p(Global_Sales),
+    User_Score_100   = User_Score * 10,
+    Genre            = as.factor(Genre),
+    Rating           = as.factor(Rating),
+    Platform         = as.factor(Platform)
+  )
+
+# Collapse rare ESRB ratings
+standard_ratings <- c("E", "E10+", "T", "M")
+df <- df %>%
+  mutate(Rating = if_else(Rating %in% standard_ratings, as.character(Rating), "Other"),
+         Rating = as.factor(Rating))
+
+# Model dataset: complete cases for all key predictors
+model_df <- df %>%
+  filter(
+    !is.na(Critic_Score),
+    !is.na(User_Score_100),
+    !is.na(Rating)
+  )
+
+cat("Rows available for modeling:", nrow(model_df), "\n")
+cat("log_Global_Sales skew:", round(moments::skewness(model_df$log_Global_Sales), 3), "\n")
+```
+
+---
+
+## 2. Full Model
+
+We include all variables we believe are relevant to predicting global sales:
+
+- `Critic_Score` — professional review scores from Metacritic
+- `User_Score_100` — user review scores scaled to 0–100
+- `Year_of_Release` — captures industry-wide trends over time
+- `Genre` — categorical, 12 levels
+- `Rating` — ESRB rating, captures target audience
+
+We exclude `Name`, `Developer`, `Publisher` (too many factor levels, would overfit),
+and regional sales (`NA_Sales`, `EU_Sales`, `JP_Sales`, `Other_Sales`) since they are
+components of `Global_Sales` — including them would be data leakage.
+
+```{r full-model}
+full_model <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+
+summary(full_model)
+```
+
+### Model Fit
+
+```{r full-model-fit}
+cat("R-squared:     ", round(summary(full_model)$r.squared,     4), "\n")
+cat("Adj R-squared: ", round(summary(full_model)$adj.r.squared, 4), "\n")
+cat("Residual SE:   ", round(summary(full_model)$sigma,         4), "\n")
+cat("F-statistic p: ", round(pf(summary(full_model)$fstatistic[1],
+                                summary(full_model)$fstatistic[2],
+                                summary(full_model)$fstatistic[3],
+                                lower.tail = FALSE), 6), "\n")
+```
+
+### Coefficient Table
+
+```{r full-model-coefs}
+coef_df <- as.data.frame(summary(full_model)$coefficients)
+coef_df$Significant <- ifelse(coef_df[,4] < 0.05, "Yes", "No")
+kable(round(coef_df, 5), caption = "Full Model Coefficients")
+```
+
+---
+
+## 3. Assumption Diagnostics
+
+### 3a. Residuals vs Fitted
+
+```{r diag-1, fig.height=4}
+plot(fitted(full_model), resid(full_model),
+     col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals",
+     main = "Residuals vs Fitted — Full Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+```
+
+### 3b. Breusch-Pagan Test (Homoscedasticity)
+
+```{r bp-test}
+bptest(full_model)
+```
+
+> A significant p-value indicates heteroscedasticity — the variance of residuals is not constant across fitted values. This is common with sales data even after log-transforming.
+
+### 3c. Normal Q-Q Plot
+
+```{r diag-qq}
+qqnorm(resid(full_model), main = "Normal Q-Q Plot — Full Model", col = "darkgrey")
+qqline(resid(full_model), col = "dodgerblue", lwd = 2)
+```
+
+### 3d. Residual Histogram
+
+```{r diag-hist, fig.height=4}
+hist(resid(full_model),
+     main   = "Histogram of Residuals — Full Model",
+     xlab   = "Residuals",
+     col    = "darkorange",
+     border = "dodgerblue",
+     breaks = 30)
+```
+
+> **Assumption Summary:**
+> - **Linearity:** Check residuals vs fitted — should show no clear pattern.
+> - **Normality:** Q-Q plot and histogram — residuals should follow a normal distribution.
+> - **Homoscedasticity:** BP test — ideally non-significant.
+> - **Independence:** Assumed given the dataset structure (one row per game-platform).
+
+---
+
+## 4. Cross-Validation (10-Fold)
+
+We use 10-fold cross-validation to get a baseline RMSE on the log scale to compare future models against.
+
+```{r cv-full}
+set.seed(42)
+
+n     <- nrow(model_df)
+folds <- sample(rep(1:10, length.out = n))
+rmse_folds <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(
+    log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+    data = train
+  )
+
+  preds <- predict(fit, newdata = test)
+  rmse_folds[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE (log scale):", round(mean(rmse_folds), 4), "\n")
+cat("SD across folds:            ", round(sd(rmse_folds),   4), "\n")
+```
+
+> This is our **baseline RMSE** — all subsequent models will be compared against this value.
+
+---
+
+## 5. Model Improvement Attempts
+
+### 5a. Remove Non-Significant Predictors (AIC-based Stepwise)
+
+```{r stepwise, results='hide'}
+step_model <- step(full_model, direction = "both", trace = 0)
+```
+
+```{r stepwise-summary}
+summary(step_model)
+cat("AIC — Full Model: ", round(AIC(full_model),  2), "\n")
+cat("AIC — Step Model: ", round(AIC(step_model),  2), "\n")
+```
+
+```{r cv-step}
+set.seed(42)
+rmse_step <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(formula(step_model), data = train)
+  preds <- predict(fit, newdata = test)
+  rmse_step[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE — Step Model:", round(mean(rmse_step), 4), "\n")
+```
+
+---
+
+### 5b. Interaction: Critic Score × Genre
+
+This tests whether the relationship between critic scores and sales varies by genre — a key research question for this project.
+
+```{r model-int-genre}
+model_int_genre <- lm(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + Year_of_Release + Rating,
+  data = model_df
+)
+
+summary(model_int_genre)
+cat("\nAIC — Interaction (Genre): ", round(AIC(model_int_genre), 2), "\n")
+```
+
+```{r cv-int-genre}
+set.seed(42)
+rmse_int_genre <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(
+    log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + Year_of_Release + Rating,
+    data = train
+  )
+  preds <- predict(fit, newdata = test)
+  rmse_int_genre[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE — Critic × Genre:", round(mean(rmse_int_genre), 4), "\n")
+```
+
+---
+
+### 5c. Interaction: Critic Score × User Score
+
+Tests whether games that score well with both critics AND users sell significantly more than what each score alone would predict.
+
+```{r model-int-scores}
+model_int_scores <- lm(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+
+summary(model_int_scores)
+cat("\nAIC — Interaction (Scores): ", round(AIC(model_int_scores), 2), "\n")
+```
+
+```{r cv-int-scores}
+set.seed(42)
+rmse_int_scores <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(
+    log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+    data = train
+  )
+  preds <- predict(fit, newdata = test)
+  rmse_int_scores[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE — Critic × User Score:", round(mean(rmse_int_scores), 4), "\n")
+```
+
+---
+
+### 5d. Polynomial: Year of Release
+
+The video game industry grew and then plateaued — a quadratic term for year may capture that curve better than a linear one.
+
+```{r model-poly-year}
+model_poly_year <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 +
+    poly(Year_of_Release, 2) + Genre + Rating,
+  data = model_df
+)
+
+summary(model_poly_year)
+cat("\nAIC — Poly Year: ", round(AIC(model_poly_year), 2), "\n")
+```
+
+```{r cv-poly-year}
+set.seed(42)
+rmse_poly_year <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(
+    log_Global_Sales ~ Critic_Score + User_Score_100 +
+      poly(Year_of_Release, 2) + Genre + Rating,
+    data = train
+  )
+  preds <- predict(fit, newdata = test)
+  rmse_poly_year[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE — Poly Year:", round(mean(rmse_poly_year), 4), "\n")
+```
+
+---
+
+### 5e. Combined Best Model
+
+Based on the above results, we combine the most promising improvements into one model.
+
+```{r model-best}
+model_best <- lm(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 +
+    poly(Year_of_Release, 2) + Rating,
+  data = model_df
+)
+
+summary(model_best)
+cat("\nAIC — Best Model: ", round(AIC(model_best), 2), "\n")
+```
+
+```{r cv-best}
+set.seed(42)
+rmse_best <- numeric(10)
+
+for (k in 1:10) {
+  train <- model_df[folds != k, ]
+  test  <- model_df[folds == k, ]
+
+  fit <- lm(
+    log_Global_Sales ~ Critic_Score * Genre + User_Score_100 +
+      poly(Year_of_Release, 2) + Rating,
+    data = train
+  )
+  preds <- predict(fit, newdata = test)
+  rmse_best[k] <- sqrt(mean((test$log_Global_Sales - preds)^2))
+}
+
+cat("10-Fold CV RMSE — Best Model:", round(mean(rmse_best), 4), "\n")
+```
+
+---
+
+## 6. Model Comparison Summary
+
+```{r comparison}
+comparison <- data.frame(
+  Model = c(
+    "Full Model",
+    "Stepwise (AIC)",
+    "Critic × Genre Interaction",
+    "Critic × User Score Interaction",
+    "Polynomial Year",
+    "Best Combined Model"
+  ),
+  AIC = round(c(
+    AIC(full_model),
+    AIC(step_model),
+    AIC(model_int_genre),
+    AIC(model_int_scores),
+    AIC(model_poly_year),
+    AIC(model_best)
+  ), 2),
+  CV_RMSE = round(c(
+    mean(rmse_folds),
+    mean(rmse_step),
+    mean(rmse_int_genre),
+    mean(rmse_int_scores),
+    mean(rmse_poly_year),
+    mean(rmse_best)
+  ), 4)
+)
+
+kable(comparison, caption = "Model Comparison — AIC and 10-Fold CV RMSE")
+```
+
+> **Lower AIC and lower CV RMSE = better model.**
+> The best model is the one with the lowest CV RMSE since that reflects out-of-sample predictive performance.
+
+---
+
+## 7. Final Model Diagnostics
+
+```{r final-diag, fig.width=11, fig.height=8}
+par(mfrow = c(2, 2))
+plot(model_best, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
+
+```{r final-bp}
+bptest(model_best)
+```
+
+```{r final-actual-pred, fig.height=5}
+model_df$fitted_best <- fitted(model_best)
+
+ggplot(model_df, aes(x = fitted_best, y = log_Global_Sales)) +
+  geom_point(alpha = 0.25, size = 0.8, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0,
+              color = "tomato", linewidth = 1, linetype = "dashed") +
+  labs(title    = "Actual vs Predicted — Best Model",
+       subtitle = "Dashed red line = perfect prediction",
+       x        = "Predicted log1p(Global Sales)",
+       y        = "Actual log1p(Global Sales)") +
+  theme_minimal()
+```
