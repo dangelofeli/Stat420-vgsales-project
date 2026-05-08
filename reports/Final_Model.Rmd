@@ -121,11 +121,11 @@ cat("Variables removed by stepwise:",
     setdiff(names(coef(full_model)), names(coef(step_model))), "\n")
 ```
 
-### 2c. Critic Score × User Score Interaction — Did Not Improve
+### 2c. Critic Score × User Score Interaction Meaningful Improvement
 
 We tested whether critic and user scores jointly predict sales beyond their individual
-effects. The interaction term was not significant and did not improve CV RMSE, so we
-do not pursue this further.
+effects. Adding the interaction term improved both AIC (7347 → 7276) and CV RMSE
+(0.4118 → 0.4098), suggesting that the combination of high critic and user scores together have a meaningful effect on sales beyond what each score predicts alone.
 
 ```{r int-scores}
 model_int_scores <- lm(
