@@ -127,16 +127,120 @@ col_summary(df) %>%
 
 > **Remaining missingness** in `Critic_Score`, `User_Score`, `Rating`, etc. reflects games that simply were not reviewed on Metacritic or rated by the ESRB, this is expected and will be addressed at the modeling stage.
 
+---
 
-## 5. Stopping Point
 
-The dataset is now clean through the missing value handling stage. Remaining steps to complete:
-
-- **Feature engineering** — log-transform of `Global_Sales`, scaling `User_Score` to 0–100, decade variable, platform grouping
-- **EDA** — distributions, genre/platform trends, score vs sales relationships
-- **Regression modeling** — OLS with `Critic_Score`, `User_Score`, `Genre`, `Rating`, `Year_of_Release`
-
-```{r save}
 write_csv(df, here::here("data", "vgsales_clean.csv"))
 cat("Saved: data/vgsales_clean.csv\n")
+
+```{r}
+df$Developer = as.factor(df$Developer)
+df$Publisher = as.factor(df$Publisher)
+df$Name = as.factor(df$Name)
+df$Platform = as.factor(df$Platform)
+df$Genre = as.factor(df$Genre)
+```
+
+```{r}
+head(df)
+str(df)
+summary(df)
+colSums(is.na(df))
+sum(complete.cases(df))
+```
+
+```{r}
+hist(df$Year_of_Release,
+     main = "Year of Release Histogram",
+     xlab = "Year",
+     ylab = "Frequency")
+boxplot(df$Year_of_Release,
+     main = "Year of Release Boxplot")
+```
+
+```{r}
+hist(df$Critic_Score,
+     main = "Critic Score Histogram",
+     xlab = "Score",
+     ylab = "Frequency")
+boxplot(df$Critic_Score,
+     main = "Critic Score Boxplot")
+```
+
+```{r}
+hist(df$Critic_Count,
+     main = "Critic Count Histogram",
+     xlab = "Count",
+     ylab = "Frequency")
+boxplot(df$Critic_Count,
+     main = "Critic Count Boxplot")
+```
+
+```{r}
+hist(df$User_Score,
+     main = "User Score Histogram",
+     xlab = "Score",
+     ylab = "Frequency")
+boxplot(df$User_Score,
+     main = "User Score Boxplot")
+```
+
+
+```{r}
+hist(df$User_Count,
+     main = "User Count Histogram",
+     xlab = "Count",
+     ylab = "Frequency")
+boxplot(df$User_Count,
+     main = "User Count Boxplot")
+```
+
+```{r}
+cor(df[sapply(df, is.numeric)], use = "pairwise.complete.obs")
+pairs(df[sapply(df, is.numeric)])
+```
+
+```{r}
+barplot(table(df$Platform),
+     main = "Platform Bar Plot",
+     xlab = "Platform",
+     ylab = "Frequency", las = 2)
+```
+
+```{r}
+barplot(table(df$Genre),
+     main = "Genre Bar Plot",
+     xlab = "Genre",
+     ylab = "Frequency", las = 2)
+```
+
+
+```{r}
+barplot(table(df$Rating),
+     main = "Rating Bar Plot",
+     xlab = "Rating",
+     ylab = "Frequency", las = 2)
+```
+
+```{r}
+fit_1 = lm(Global_Sales ~ .-Name-NA_Sales-EU_Sales-JP_Sales-Other_Sales, data = df)
+```
+
+```{r}
+plot(fitted(fit_1), resid(fit_1), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from Model 1")
+abline(h = 0, col = "darkorange", lwd = 2)
+library(lmtest)
+bptest(fit_1)
+h = hist(resid(fit_1),
+     xlab   = "Residuals",
+     main   = "Histogram of Residuals, fit_1",
+     col    = "darkorange",
+     border = "dodgerblue",
+     breaks = 20)
+```
+
+```{r}
+qqnorm(resid(fit_1), main = "Normal Q-Q Plot, fit_1", col = "darkgrey")
+qqline(resid(fit_1), col = "dodgerblue", lwd = 2)
 ```
