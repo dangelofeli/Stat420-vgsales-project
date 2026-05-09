@@ -82,7 +82,7 @@ We include all variables we believe are relevant to predicting global sales:
 - `Genre` — categorical, 12 levels
 - `Rating` — ESRB rating, captures target audience
 
-We exclude `Name`, `Developer`, `Publisher` (too many factor levels, would overfit),
+We exclude `Name`, `Developer`, `Publisher`, `Platform` (too many factor levels, would overfit),
 and regional sales (`NA_Sales`, `EU_Sales`, `JP_Sales`, `Other_Sales`) since they are
 components of `Global_Sales`, including them would be data leakage.
 
