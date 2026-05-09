@@ -12,16 +12,14 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo    = TRUE,
+  echo = TRUE,
   warning = FALSE,
   message = FALSE,
-  fig.width  = 10,
+  fig.width = 10,
   fig.height = 5,
   dpi = 150
 )
 ```
-
-## Setup
 
 ```{r libs}
 library(tidyverse)
@@ -31,24 +29,24 @@ library(knitr)
 source(here::here("R", "01_load_clean.R"))
 ```
 
-
-## 1. Load Raw Data
+## Loading the Data
 
 ```{r load}
 raw <- load_raw()
 glimpse(raw)
 ```
 
+## Missing Values
 
-## 2. Missing Value Overview
+The first thing we wanted to look at was how much data is actually missing. A lot of the review-related columns come from Metacritic which didn't cover every game, especially older titles, so we expected some gaps there.
 
-```{r missing-table}
+```{r missing_table}
 col_summary(raw) %>%
   arrange(desc(null_pct)) %>%
-  kable(digits = 2, caption = "Missing Values — Raw Dataset")
+  kable(digits = 2, caption = "Missing Values in Raw Dataset")
 ```
 
-```{r missing-plot, fig.height=4}
+```{r missing_plot, fig.height=4}
 col_summary(raw) %>%
   filter(null_pct > 0) %>%
   ggplot(aes(x = reorder(column, null_pct), y = null_pct)) +
@@ -59,89 +57,78 @@ col_summary(raw) %>%
   theme_minimal()
 ```
 
-> **Observations:**
-> - `Critic_Score`, `User_Score`, `Critic_Count`, `User_Count`, `Developer`, and `Rating` all have substantial missingness, these come from Metacritic and were not available for every title.
-> - `Year_of_Release` and `Genre` have minor missingness.
-> - Sales columns and `Name`/`Platform`/`Publisher` are nearly complete.
+As expected, Critic_Score, User_Score, Critic_Count, User_Count, Developer, and Rating all have a lot of missing data since those come from Metacritic and weren't available for every title. Year_of_Release and Genre have minor missingness and the sales columns are almost complete.
 
+## Cleaning
 
-## 3. Cleaning Steps
+### Drop Rows with No Sales
 
-### 3a. Remove Missing / Zero Target
+We can't model games with no Global_Sales value so we remove those first.
 
-We cannot model rows with no `Global_Sales` value.
-
-```{r clean-target}
+```{r clean_target}
 df <- raw %>% clean_target()
-cat("Rows remaining:", nrow(df), "\n")
+cat("rows remaining:", nrow(df), "\n")
 ```
 
-### 3b. Clean Year of Release
+### Fix Year of Release
 
-`Year_of_Release` is stored as character (some entries are `"N/A"`). We coerce to integer and drop implausible values outside 1980–2020.
+Year_of_Release came in as a character column with some entries saying "N/A". We convert it to an integer and drop anything outside 1980-2020 since those are either errors or too far out of range to be useful.
 
-```{r clean-year}
+```{r clean_year}
 df <- df %>% clean_year()
-cat("Year range:", range(df$Year_of_Release), "\n")
+cat("year range:", range(df$Year_of_Release), "\n")
 ```
 
-### 3c. Filter Valid Genres
+### Filter Genres
 
-Drop rows with missing or unrecognised genre values.
+A small number of rows had missing or unrecognized genre values. We dropped those.
 
-```{r clean-genre}
+```{r clean_genre}
 df <- df %>% clean_genre()
-cat("Genres present:", paste(sort(unique(df$Genre)), collapse = ", "), "\n")
+cat("genres:", paste(sort(unique(df$Genre)), collapse = ", "), "\n")
 ```
 
-### 3d. Clean User Score
+### Fix User Score
 
-`User_Score` contains `"tbd"` strings where a score hasn't been assigned yet. We replace these with `NA` and convert the column to numeric.
+User_Score had "tbd" entries for games that hadn't been scored yet. We replaced those with NA and converted the column to numeric.
 
-```{r clean-user-score}
+```{r clean_user_score}
 df <- df %>% clean_user_score()
-
-cat("User_Score — NA count after cleaning:",
-    sum(is.na(df$User_Score)), "\n")
+cat("User_Score NAs after cleaning:", sum(is.na(df$User_Score)), "\n")
 ```
 
-### 3e. Standardise ESRB Rating
+### Clean Up ESRB Ratings
 
-Non-standard ESRB values are collapsed to `"Other"` and missing ratings are labeled `"Unknown"`.
+There were a handful of non-standard rating values. We collapsed those into "Other" and filled missing ratings as "Unknown".
 
-```{r clean-rating}
+```{r clean_rating}
 df <- df %>% clean_rating()
 df %>% count(Rating, sort = TRUE) %>% kable()
 ```
 
+## Where Things Stand After Cleaning
 
-## 4. Cleaned Dataset Summary
-
-```{r cleaned-summary}
-cat("Shape after cleaning:", nrow(df), "rows x", ncol(df), "cols\n\n")
+```{r cleaned_summary}
+cat("shape:", nrow(df), "rows x", ncol(df), "cols\n\n")
 
 col_summary(df) %>%
   arrange(desc(null_pct)) %>%
-  kable(digits = 2, caption = "Missing Values — After Cleaning")
+  kable(digits = 2, caption = "Missing Values After Cleaning")
 ```
 
-> **Remaining missingness** in `Critic_Score`, `User_Score`, `Rating`, etc. reflects games that simply were not reviewed on Metacritic or rated by the ESRB, this is expected and will be addressed at the modeling stage.
+The remaining missingness in Critic_Score, User_Score, Rating, and Developer is expected - these are just games that weren't on Metacritic or didn't get an ESRB rating. We'll handle those at the modeling stage by only using complete cases.
 
----
+## Convert to Factors and Explore
 
-
-write_csv(df, here::here("data", "vgsales_clean.csv"))
-cat("Saved: data/vgsales_clean.csv\n")
-
-```{r}
-df$Developer = as.factor(df$Developer)
-df$Publisher = as.factor(df$Publisher)
-df$Name = as.factor(df$Name)
-df$Platform = as.factor(df$Platform)
-df$Genre = as.factor(df$Genre)
+```{r factors}
+df$Developer <- as.factor(df$Developer)
+df$Publisher <- as.factor(df$Publisher)
+df$Name <- as.factor(df$Name)
+df$Platform <- as.factor(df$Platform)
+df$Genre <- as.factor(df$Genre)
 ```
 
-```{r}
+```{r explore}
 head(df)
 str(df)
 summary(df)
@@ -149,98 +136,127 @@ colSums(is.na(df))
 sum(complete.cases(df))
 ```
 
-```{r}
+## Distributions
+
+### Year of Release
+
+```{r year_dist}
 hist(df$Year_of_Release,
-     main = "Year of Release Histogram",
+     main = "Year of Release",
      xlab = "Year",
      ylab = "Frequency")
 boxplot(df$Year_of_Release,
-     main = "Year of Release Boxplot")
+        main = "Year of Release Boxplot")
 ```
 
-```{r}
+### Critic Score
+
+```{r critic_dist}
 hist(df$Critic_Score,
-     main = "Critic Score Histogram",
+     main = "Critic Score",
      xlab = "Score",
      ylab = "Frequency")
 boxplot(df$Critic_Score,
-     main = "Critic Score Boxplot")
+        main = "Critic Score Boxplot")
 ```
 
-```{r}
+### Critic Count
+
+```{r critic_count_dist}
 hist(df$Critic_Count,
-     main = "Critic Count Histogram",
+     main = "Critic Count",
      xlab = "Count",
      ylab = "Frequency")
 boxplot(df$Critic_Count,
-     main = "Critic Count Boxplot")
+        main = "Critic Count Boxplot")
 ```
 
-```{r}
+### User Score
+
+```{r user_dist}
 hist(df$User_Score,
-     main = "User Score Histogram",
+     main = "User Score",
      xlab = "Score",
      ylab = "Frequency")
 boxplot(df$User_Score,
-     main = "User Score Boxplot")
+        main = "User Score Boxplot")
 ```
 
+### User Count
 
-```{r}
+```{r user_count_dist}
 hist(df$User_Count,
-     main = "User Count Histogram",
+     main = "User Count",
      xlab = "Count",
      ylab = "Frequency")
 boxplot(df$User_Count,
-     main = "User Count Boxplot")
+        main = "User Count Boxplot")
 ```
 
-```{r}
+## Correlations
+
+```{r correlations}
 cor(df[sapply(df, is.numeric)], use = "pairwise.complete.obs")
 pairs(df[sapply(df, is.numeric)])
 ```
 
-```{r}
+## Categorical Variables
+
+```{r platform_bar}
 barplot(table(df$Platform),
-     main = "Platform Bar Plot",
-     xlab = "Platform",
-     ylab = "Frequency", las = 2)
+        main = "Games by Platform",
+        xlab = "Platform",
+        ylab = "Count", las = 2)
 ```
 
-```{r}
+```{r genre_bar}
 barplot(table(df$Genre),
-     main = "Genre Bar Plot",
-     xlab = "Genre",
-     ylab = "Frequency", las = 2)
+        main = "Games by Genre",
+        xlab = "Genre",
+        ylab = "Count", las = 2)
 ```
 
-
-```{r}
+```{r rating_bar}
 barplot(table(df$Rating),
-     main = "Rating Bar Plot",
-     xlab = "Rating",
-     ylab = "Frequency", las = 2)
+        main = "Games by Rating",
+        xlab = "Rating",
+        ylab = "Count", las = 2)
 ```
 
-```{r}
-fit_1 = lm(Global_Sales ~ .-Name-NA_Sales-EU_Sales-JP_Sales-Other_Sales, data = df)
+## Initial Model
+
+Before getting into the full modeling file we fit a quick initial model just to get a feel for the data. We used raw Global_Sales as the response here which we knew would be skewed - the diagnostics below show that clearly. The log transformation is applied in the modeling file.
+
+```{r fit_1}
+fit_1 <- lm(Global_Sales ~ . -Name -NA_Sales -EU_Sales -JP_Sales -Other_Sales, data = df)
 ```
 
-```{r}
+```{r fit_1_diagnostics}
 plot(fitted(fit_1), resid(fit_1), col = "grey", pch = 20,
-     xlab = "Fitted", ylab = "Residuals", main = "Data from Model 1")
+     xlab = "Fitted", ylab = "Residuals", main = "Residuals vs Fitted - fit_1")
 abline(h = 0, col = "darkorange", lwd = 2)
+
 library(lmtest)
 bptest(fit_1)
-h = hist(resid(fit_1),
-     xlab   = "Residuals",
-     main   = "Histogram of Residuals, fit_1",
-     col    = "darkorange",
+
+hist(resid(fit_1),
+     xlab = "Residuals",
+     main = "Histogram of Residuals - fit_1",
+     col = "darkorange",
      border = "dodgerblue",
      breaks = 20)
 ```
 
-```{r}
-qqnorm(resid(fit_1), main = "Normal Q-Q Plot, fit_1", col = "darkgrey")
+```{r fit_1_qq}
+qqnorm(resid(fit_1), main = "Normal Q-Q Plot - fit_1", col = "darkgrey")
 qqline(resid(fit_1), col = "dodgerblue", lwd = 2)
+```
+
+The residuals are clearly not normal and the BP test confirms heteroscedasticity. This is why we log-transform Global_Sales before fitting the full model.
+
+## Save Clean Data
+
+```{r save}
+write_csv(df, here::here("data", "vgsales_clean.csv"))
+cat("saved vgsales_clean.csv\n")
 ```
