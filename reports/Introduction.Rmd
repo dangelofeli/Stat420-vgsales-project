@@ -1,0 +1,328 @@
+---
+title: 'STAT 420 Final Project: Analysis of Video Game Sales'
+author: "Dangelo Feliciano, Anirudh Eswara"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: flatly
+    code_folding: show
+  pdf_document:
+    toc: true
+    toc_depth: '4'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width  = 10,
+  fig.height = 5,
+  dpi = 150
+)
+```
+
+## 1. Introduction
+
+The dataset used for this project is the Video Game Sales with Ratings dataset on Kaggle. This dataset has been compiled using a web scrape from VGChartsz, a video game sales tracking website, extended with critic and user review scores scraped from Metacritic, a review aggregation website. This dataset contains information on 16,720 video game titles released from 1980 to 2020. Each row in the dataset represents a single video game title released on a specific platform. If a title is released on multiple platforms, it will have an entry for each platform. 
+
+
+The dataset is comprised of the following variables:
+
+
+* `Name` - Name of the game (e.g., Wii Sports, Super Mario Bros., Mario Kart Wii, etc)
+* `Platform` -  Console on which the game is running (e.g., Wii, NES, GB, etc)
+* `Year_of_Release` - Year that the game was released (1980-2020)
+* `Genre` - Game's category (e.g., Sports, Platform, Racing, etc)
+* `Publisher` - Publisher of the game (e.g., Nintendo, Microsoft Game Studios, Take-Two Interactive, etc)
+* `NA_Sales` - Game sales in North America (in millions of units)
+* `EU_Sales` - Game sales in the European Union (in millions of units)
+* `JP_Sales` - Game sales in Japan (in millions of units)
+* `Other_Sales` - Game sales in the rest of the world, i.e., Africa, Asia excluding Japan, Australia, and Europe excluding the EU)
+* `Global_Sales` - Global game sales (in millions of units)
+* `Critic_Score` - Average score of Metacritic's staff where each score is in the range of 0 to 100
+* `Critic Count` - Number of critics who gave a `Critic_Score`
+* `User_Score` - Average score of Metacritic's subscribers where each score is in the range of 0 to 10
+* `User_Count` - Number of users who gave a `User_Score`
+* `Developer` - The video game developer that created the game (e.g., Nintendo, Good Science Studio, Rockstar North, etc.)
+* `Rating` - ESRB rating (e.g., Everyone, Teen, Adults Only, etc.)
+
+
+
+The goal of this analysis is to predict a video game’s global sales (`Global_Sales`) using a subset of its other metadata attributes. Our analysis will explore how these other attributes relate to game sales as well as how they relate and interact with one another. By modelling the relationship between a video game's global sales and its other metadata attributes, video game developers and/or publishers can use information gathered from the game's pre-release (e.g., user and critic scores) and other information related the game (e.g., platform, genre, rating) to predict future sales and therefore be able to make improved business decisions.
+
+## 2. Methods
+
+```{r libs}
+library(tidyverse)
+library(scales)
+library(knitr)
+
+source(here::here("R", "01_load_clean.R"))
+```
+
+### 2a. Data Cleaning
+
+#### **Setup**
+
+##### Load Raw Data
+
+```{r load}
+raw <- load_raw()
+glimpse(raw)
+```
+
+
+##### Missing Value Overview
+
+```{r missing-table}
+col_summary(raw) %>%
+  arrange(desc(null_pct)) %>%
+  kable(digits = 2, caption = "Missing Values — Raw Dataset")
+```
+
+```{r missing-plot, fig.height=4}
+col_summary(raw) %>%
+  filter(null_pct > 0) %>%
+  ggplot(aes(x = reorder(column, null_pct), y = null_pct)) +
+  geom_col(fill = "steelblue", color = "white") +
+  coord_flip() +
+  labs(title = "Missing Value Rate by Column",
+       x = NULL, y = "Missing (%)") +
+  theme_minimal()
+```
+
+> **Observations:**
+> - `Critic_Score`, `User_Score`, `Critic_Count`, `User_Count`, `Developer`, and `Rating` all have substantial missingness, these come from Metacritic and were not available for every title.
+> - `Year_of_Release` and `Genre` have minor missingness.
+> - Sales columns and `Name`/`Platform`/`Publisher` are nearly complete.
+
+
+#### **Cleaning Steps**
+
+##### Remove Missing / Zero Target
+
+We cannot model rows with no `Global_Sales` value.
+
+```{r clean-target}
+df <- raw %>% clean_target()
+cat("Rows remaining:", nrow(df), "\n")
+```
+
+##### Clean Year of Release
+
+`Year_of_Release` is stored as character (some entries are `"N/A"`). We coerce to integer and drop implausible values outside 1980–2020.
+
+```{r clean-year}
+df <- df %>% clean_year()
+cat("Year range:", range(df$Year_of_Release), "\n")
+```
+
+##### Filter Valid Genres
+
+Drop rows with missing or unrecognised genre values.
+
+```{r clean-genre}
+df <- df %>% clean_genre()
+cat("Genres present:", paste(sort(unique(df$Genre)), collapse = ", "), "\n")
+```
+
+##### Clean User Score
+
+`User_Score` contains `"tbd"` strings where a score hasn't been assigned yet. We replace these with `NA` and convert the column to numeric.
+
+```{r clean-user-score}
+df <- df %>% clean_user_score()
+
+cat("User_Score — NA count after cleaning:",
+    sum(is.na(df$User_Score)), "\n")
+```
+
+##### Standardise ESRB Rating
+
+Non-standard ESRB values are collapsed to `"Other"` and missing ratings are labeled `"Unknown"`.
+
+```{r clean-rating}
+df <- df %>% clean_rating()
+df %>% count(Rating, sort = TRUE) %>% kable()
+```
+
+
+#### **Cleaned Dataset Summary**
+
+```{r cleaned-summary}
+cat("Shape after cleaning:", nrow(df), "rows x", ncol(df), "cols\n\n")
+
+col_summary(df) %>%
+  arrange(desc(null_pct)) %>%
+  kable(digits = 2, caption = "Missing Values — After Cleaning")
+```
+
+> **Remaining missingness** in `Critic_Score`, `User_Score`, `Rating`, etc. reflects games that simply were not reviewed on Metacritic or rated by the ESRB, this is expected and will be addressed at the modeling stage.
+
+---
+
+
+
+
+### 2b. EDA
+
+We will coerce all the remaining categorical variables to factors prior to doing EDA.
+```{r}
+df$Developer = as.factor(df$Developer)
+df$Publisher = as.factor(df$Publisher)
+df$Name = as.factor(df$Name)
+df$Platform = as.factor(df$Platform)
+df$Genre = as.factor(df$Genre)
+```
+
+A snippet of the first few rows in the dataframe:
+```{r}
+head(df)
+```
+
+We now look at the data types of the variables in the dataframe after cleaning and factor coercion:
+```{r}
+str(df)
+```
+
+A summary of the dataframe showing basic statistics for each variable:
+```{r}
+summary(df)
+```
+
+We now calculate the number of rows with no missing values:
+```{r}
+sum(complete.cases(df))
+```
+
+We now present a histogram and box plot for the the response variable `Global_Sales`:
+```{r, echo = FALSE}
+par(mfrow = c(1,2))
+
+hist(df$Global_Sales, breaks = 50,
+     main = "Global Sales Histogram",
+     xlab = "Sales (in millions of units)",
+     ylab = "Frequency",
+     col = "blue")
+boxplot(df$Global_Sales,
+     main = "Global Sales Box Plot",
+     ylab = "Sales (in millions of units)",
+     col = "blue")
+par(mfrow = c(1,1))
+```
+From looking at the histogram and box plot of the global sales variable, we see that the distribution appears to be right-skewed. Therefore, applying a logarithmic transformation is something that should be considered when creating a model.
+
+
+
+
+
+We now present histograms and box plots for the relevant quantitative variables in the dataset: `Year_of_Release`, `Critic_Score`, `Critic_Count`, `User_Score`, `User_Count`. We do not show plots for `NA_Sales`, `EU_Sales`, `JP_Sales`, and `Other_Sales` since they can be aggregated to determine `Global_Sales` and therefore are not variables that will be used in our models.
+```{r, echo = FALSE}
+par(mfrow = c(1,5))
+hist(df$Year_of_Release,
+     main = "Year of Release Histogram",
+     xlab = "Year",
+     ylab = "Frequency", 
+     col = "blue")
+hist(df$Critic_Score,
+     main = "Critic Score Histogram",
+     xlab = "Score",
+     ylab = "Frequency", 
+     col = "blue")
+hist(df$Critic_Count,
+     main = "Critic Count Histogram",
+     xlab = "Count",
+     ylab = "Frequency", 
+     col = "blue")
+hist(df$User_Score,
+     main = "User Score Histogram",
+     xlab = "Score",
+     ylab = "Frequency", 
+     col = "blue")
+hist(df$User_Count,
+     main = "User Count Histogram",
+     xlab = "Count",
+     ylab = "Frequency", 
+     col = "blue")
+par(mfrow = c(1,1))
+```
+
+```{r, echo = FALSE}
+par(mfrow = c(1,5))
+boxplot(df$Year_of_Release,
+     main = "Year of Release Box Plot",
+     ylab = "Year", 
+     col = "green")
+boxplot(df$Critic_Score,
+     main = "Critic Score Box Plot",
+     ylab = "Score", 
+     col = "green")
+boxplot(df$Critic_Count,
+     main = "Critic Count Box Plot",
+     ylab = "Count", 
+     col = "green")
+boxplot(df$User_Score,
+     main = "User Score Box Plot",
+     ylab = "Score", 
+     col = "green")
+boxplot(df$User_Count,
+     main = "User Count Box Plot",
+     ylab = "Count", 
+     col = "green")
+par(mfrow = c(1,1))
+```
+
+From observing the histograms and box plots of each quantitative variable we are able to determine the skewness and can identify which variables may have outliers.
+From its histogram and box plot, we notice that the distribution of the `Year_of_Release` variable is left-skewed and a few low outliers. The `Critic_Score` and `User_Score` similarly both have a left-skewed distribution and several low outliers. Interestingly, the `User_Score` seems to be more left-skewed than the `Critic_Score` potentially indicate that users are more inclined to give higher ratings on average. The `Critic_Count` has a distribution that is right-skewed with several high outliers. The distribution of `User_Count` appears to have a large right-skew with many high outliers potentially indiciating that a few game exists that are extremely popular resulting in a larger `User_Count` value. 
+
+We now try to visually determine if there is any correlation between pairs of potential predictor variables:
+```{r, echo = FALSE}
+pairs(df[,c("Year_of_Release", "Critic_Score", "Critic_Count", "User_Score", "User_Count")])
+```
+
+Since there seems to be some potential correlation between `Critic_Score` and `User_Score`, we plot them separately:
+```{r, echo = FALSE}
+plot(df$Critic_Score, df$User_Score, main = "Critic Score vs User Score",
+     xlab = "Critic Score",
+     ylab = "User Score")
+abline(lm(df$User_Score ~ df$Critic_Score, data = df), col = "red")
+```
+
+```{r}
+correlation = cor(df$Critic_Score, df$User_Score, use = "complete.obs")
+correlation
+```
+From the scatterplot and the correlation calculation of `r correlation`, we see that there is a moderate positive correlation between `Critic_Score` and `User_Score`. This could be a potential indicator of multicollinearity.
+
+
+
+We now present bar plots for the relevant categorical variables in the dataset: `Platform`, `Genre`, and `Rating`. We do not show plots for `Developer`, `Publisher` due to their high number of factor levels and do not plot `Name` as it is an identifier for each title.
+
+```{r, echo = FALSE}
+barplot(table(df$Platform),
+     main = "Platform Bar Plot",
+     xlab = "Platform",
+     ylab = "Frequency", las = 2)
+par(mfrow = c(1,2))
+barplot(table(df$Genre),
+     main = "Genre Bar Plot",
+     xlab = "Genre",
+     ylab = "Frequency", las = 2)
+
+barplot(table(df$Rating),
+     main = "Rating Bar Plot",
+     xlab = "Rating",
+     ylab = "Frequency", las = 2)
+par(mfrow = c(1,1))
+```
+
+We notice that the most common platforms are `DS` and `PS2` and the least common platforms are `GG`, `PCFX`, and `TG16`. For genres,  we have `Action` as the most common genres and `Puzzle` and `Strategy` as the least commmon genres. We see from the Rating Bar Plot that `Other` is the most common rating and `AO`, `RP`, and `Unknown` as the least commmon ratings.
+
+
+
+
+
