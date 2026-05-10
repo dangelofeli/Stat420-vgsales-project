@@ -320,7 +320,7 @@ barplot(table(df$Rating),
 par(mfrow = c(1,1))
 ```
 
-We notice that the most common platforms are `DS` and `PS2` and the least common platforms are `GG`, `PCFX`, and `TG16`. For genres,  we have `Action` as the most common genres and `Puzzle` and `Strategy` as the least commmon genres. We see from the Rating Bar Plot that `Other` is the most common rating and `AO`, `RP`, and `Unknown` as the least commmon ratings.
+We notice that the most common platforms are `DS` and `PS2` and the least common platforms are `GG`, `PCFX`, and `TG16`. For genres,  we have `Action` as the most common genres and `Puzzle` and `Strategy` as the least commmon genres. We see from the Rating Bar Plot that `Other` is the most common rating and `AO`, `RP`, and `Unknown` as the least common ratings.
 
 
 
