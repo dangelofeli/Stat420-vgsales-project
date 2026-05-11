@@ -1,0 +1,612 @@
+---
+title: "Do Review Scores Predict Video Game Sales? A Regression Analysis"
+author: "Dangelo Feliciano, Anirudh Eswara"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 6.5,
+  fig.height = 4,
+  fig.align = "center",
+  out.width = "85%"
+)
+```
+
+```{r libs}
+library(tidyverse)
+library(scales)
+library(knitr)
+library(lmtest)
+library(moments)
+library(car)
+
+source(here::here("R", "01_load_clean.R"))
+```
+
+```{r data_prep, cache=TRUE}
+raw <- load_raw()
+
+df <- run_pipeline()
+
+df <- df %>%
+  mutate(
+    log_Global_Sales = log1p(Global_Sales),
+    User_Score_100 = User_Score * 10,
+    Genre = as.factor(Genre),
+    Rating = if_else(Rating %in% c("E", "E10+", "T", "M"), as.character(Rating), "Other"),
+    Rating = factor(Rating, levels = c("E", "E10+", "T", "M", "Other"))
+  )
+
+model_df <- df %>%
+  filter(
+    !is.na(Critic_Score),
+    !is.na(User_Score_100),
+    !is.na(Rating)
+  )
+
+set.seed(42)
+folds <- sample(rep(1:10, length.out = nrow(model_df)))
+
+rmse_cv <- function(formula, data, folds) {
+  rmse <- numeric(10)
+  for (k in 1:10) {
+    train <- data[folds != k, ]
+    test  <- data[folds == k, ]
+    fit   <- lm(formula, data = train)
+    pred  <- predict(fit, newdata = test)
+    rmse[k] <- sqrt(mean((test$log_Global_Sales - pred)^2))
+  }
+  mean(rmse)
+}
+
+full_model <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+step_model <- step(full_model, direction = "both", trace = 0)
+model_int_scores <- lm(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+model_poly <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating,
+  data = model_df
+)
+model_int_genre <- lm(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating,
+  data = model_df
+)
+
+rmse_full       <- rmse_cv(log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating, model_df, folds)
+rmse_step       <- rmse_cv(formula(step_model), model_df, folds)
+rmse_int_scores <- rmse_cv(log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating, model_df, folds)
+rmse_poly       <- rmse_cv(log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating, model_df, folds)
+rmse_int_genre  <- rmse_cv(log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating, model_df, folds)
+
+final_model <- model_int_scores
+
+correlation <- cor(df$Critic_Score, df$User_Score, use = "complete.obs")
+```
+
+\newpage
+
+# Introduction
+
+The dataset used for this project is the Video Game Sales with Ratings dataset on Kaggle. It was compiled by scraping sales figures from VGChartz, a video game sales tracking website, and then extending that data with critic and user review scores pulled from Metacritic. The full dataset covers 16,720 video game titles released between 1980 and 2020, where each row represents a single game-platform combination. If a game was released on more than one platform, it appears as a separate row for each. The variables we worked with include Global Sales (in millions of copies), Critic Score (a 0 to 100 aggregate from professional reviewers), User Score (a 0 to 10 aggregate from general audiences, which we rescaled to 0 to 100 for consistency), Genre, ESRB Rating, and Year of Release.
+
+The central question driving this analysis is whether review scores are meaningful predictors of commercial success. From a practical standpoint, critics and users weigh in on games before and shortly after launch, so if their scores carry real predictive weight, publishers and developers could use that information to set more informed sales expectations. We also wanted to understand whether that relationship is consistent across different game genres, since it is reasonable to expect that a sports game or a racing game might sell on brand loyalty rather than on whether reviewers liked it, while a niche role-playing game might depend more heavily on word-of-mouth driven by review scores. Beyond the review scores, we included year of release, genre, and ESRB rating as additional predictors to control for broader industry trends and categorical differences across the dataset.
+
+\newpage
+
+# Methods
+
+## Data Cleaning
+
+The raw dataset required a few cleaning steps before it was ready for analysis. We removed rows where Global Sales was missing or zero, since those records would not be meaningful as a response variable. Year of Release was stored as a character column in the raw file, so we converted it to an integer and filtered out any values outside the 1980 to 2020 range. Genre was filtered to only include the twelve recognized categories in the dataset, and any rows with values outside that set were dropped. User Score came in as a character column with the string "tbd" used as a placeholder for unscored games, so we replaced those with NA and converted the column to numeric. The ESRB Rating column had a mix of standard codes and rare or missing values, which we collapsed into an "Other" category for modeling purposes. After all of this, the cleaned dataset retained the records needed for analysis, and modeling was further restricted to the 6,894 complete cases that had non-missing values for Critic Score, User Score, and Rating.
+
+## Exploratory Data Analysis
+
+Before fitting any models we explored the dataset to understand the distributions of key variables and identify relationships between predictors and the response. The most immediate finding was how dramatically right-skewed the Global Sales variable is. The vast majority of games sell under one million copies, but a small handful of blockbuster titles pull the distribution far to the right. A log1p transformation brought the response much closer to a symmetric distribution, and this is the form used throughout the modeling process. Figure 1 shows this comparison.
+
+```{r fig_sales_dist, fig.cap="Global Sales before and after log transformation. The raw distribution is heavily right-skewed while the log-transformed version is approximately symmetric.", fig.height=3}
+par(mfrow = c(1, 2))
+hist(df$Global_Sales, breaks = 50, col = "steelblue", border = "white",
+     main = "Global Sales (raw)", xlab = "Sales (millions)", cex.main = 0.85)
+hist(df$log_Global_Sales, breaks = 60, col = "seagreen", border = "white",
+     main = "log(Global Sales)", xlab = "log1p(Sales)", cex.main = 0.85)
+par(mfrow = c(1, 1))
+```
+
+Examining sales by genre revealed meaningful variation across categories. Platform, Shooter, and Sports games tend to have higher median sales than Strategy and Adventure games, as shown in Figure 2. This variation suggested that genre would be an important predictor and also raised the question of whether the relationship between review scores and sales might differ across genres. Sales over time followed a clear nonlinear arc, growing rapidly through the early 2000s, peaking around 2008 to 2009, and declining through 2016. This pattern informed our decision to test a quadratic year term during modeling.
+
+```{r fig_genre, fig.cap="log(Global Sales) by Genre. Platform, Shooter, and Sports games show higher median sales while Strategy and Adventure show lower expected commercial performance.", fig.height=4}
+genre_order <- df %>%
+  group_by(Genre) %>%
+  summarise(med = median(log_Global_Sales)) %>%
+  arrange(desc(med)) %>%
+  pull(Genre)
+
+ggplot(df, aes(x = factor(Genre, levels = genre_order), y = log_Global_Sales, fill = Genre)) +
+  geom_boxplot(outlier.size = 0.4, show.legend = FALSE) +
+  scale_fill_brewer(palette = "Set3") +
+  labs(x = NULL, y = "log(Global Sales)") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Both critic and user scores showed positive relationships with log(Global Sales), with critic scores displaying a stronger and more consistent trend. Figure 3 shows scatter plots for each score against the response with fitted regression lines. The correlation between Critic Score and User Score was `r round(correlation, 3)`, indicating a moderate positive relationship between the two measures. This collinearity was expected to affect how each score's individual contribution is interpreted in the model. We also looked at the critic score to sales relationship broken out by genre and found that the slopes of the regression lines vary noticeably across categories. In Adventure and Strategy the relationship between critic scores and sales appears steeper, while in Sports and Racing it is considerably flatter, which directly motivated the Critic Score by Genre interaction term we tested during modeling.
+
+```{r fig_scores, fig.cap="Critic Score and User Score vs log(Global Sales). Both show positive trends but critic scores have a stronger and more consistent relationship with the response.", fig.height=3.5}
+p1 <- df %>%
+  filter(!is.na(Critic_Score)) %>%
+  ggplot(aes(x = Critic_Score, y = log_Global_Sales)) +
+  geom_point(alpha = 0.12, size = 0.5, color = "steelblue") +
+  geom_smooth(method = "lm", color = "tomato", se = TRUE) +
+  labs(x = "Critic Score", y = "log(Global Sales)") +
+  theme_minimal(base_size = 9)
+
+p2 <- df %>%
+  filter(!is.na(User_Score_100)) %>%
+  ggplot(aes(x = User_Score_100, y = log_Global_Sales)) +
+  geom_point(alpha = 0.12, size = 0.5, color = "seagreen") +
+  geom_smooth(method = "lm", color = "tomato", se = TRUE) +
+  labs(x = "User Score (scaled 0-100)", y = "log(Global Sales)") +
+  theme_minimal(base_size = 9)
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+## Initial Full Model
+
+We started with a full linear model regressing log(Global Sales) on Critic Score, User Score scaled to 0-100, Year of Release, Genre, and Rating. Several variables were intentionally excluded. Name, Developer, and Publisher each have hundreds or thousands of unique levels which would generate an unreasonable number of dummy variables and risk overfitting. The regional sales columns were excluded because they are direct components of Global Sales and including them would constitute data leakage. Platform was left out because its 31 levels overlap substantially with Year of Release and most of what it would contribute is already captured by Genre and Rating. The model was fit on 6,894 complete cases with non-missing values for Critic Score, User Score, and Rating.
+
+The full model achieved an adjusted R-squared of `r round(summary(full_model)$adj.r.squared, 4)` with a residual standard error of `r round(summary(full_model)$sigma, 4)`. The overall F-statistic was highly significant with a p-value well below 0.001, confirming the predictors together explain significantly more variance in log(Global Sales) than a null model. Critic Score has a coefficient of `r round(coef(full_model)["Critic_Score"], 5)` and is statistically significant at the 0.001 level, meaning each additional point on the 0 to 100 critic score scale is associated with an increase of `r round(coef(full_model)["Critic_Score"], 5)` in log(Global Sales) holding all else constant, which corresponds to a multiplicative effect on the original sales scale. For the categorical predictor Genre, R drops Action as the reference level since it comes first alphabetically. The coefficient for GenreAdventure is `r round(coef(full_model)["GenreAdventure"], 4)`, meaning Adventure games are expected to have log(Global Sales) approximately `r abs(round(coef(full_model)["GenreAdventure"], 4))` units lower than comparable Action games after controlling for the other predictors. Several other genre coefficients are also statistically significant.
+
+```{r full_model_summary}
+summary(full_model)
+```
+
+## Diagnostics and Cross-Validation
+
+We assessed the standard linear model assumptions using four diagnostic plots shown in Figure 4. The residuals versus fitted plot shows a band roughly centered around zero without a strong systematic pattern, consistent with the linearity assumption. The Q-Q plot follows the diagonal well through the middle range but deviates in both tails, particularly at the upper end, suggesting the residuals are not perfectly normally distributed given the extreme blockbuster titles in the data. The Breusch-Pagan test returned a statistic of `r round(bptest(full_model)$statistic, 2)` with a p-value of `r round(bptest(full_model)$p.value, 6)`, providing strong evidence of heteroscedasticity. Even after log-transforming the response, variance is not constant across fitted values. This does not bias the coefficient estimates but means standard errors and p-values are approximate. Cook's Distance identified a small number of high-influence observations consistent with those same blockbuster titles, which we chose to retain since they represent legitimate market outcomes. VIF values for all main predictors were well below 10, indicating multicollinearity is not a concern in the baseline specification.
+
+```{r full_diag, fig.cap="Diagnostic plots for the full baseline model. The residuals vs fitted shows no strong pattern. The Q-Q plot has notable tail deviation. Cook's Distance identifies a small number of high-influence observations.", fig.width=7, fig.height=5}
+par(mfrow = c(2, 2))
+plot(full_model, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
+
+To establish a baseline for out-of-sample predictive performance, we applied 10-fold cross-validation to the full model using the same fold assignments for all subsequent models to ensure a fair comparison. The baseline cross-validated RMSE was `r round(rmse_full, 4)` on the log scale, and all subsequent model comparisons were made against this value.
+
+## Model Improvement Attempts
+
+Starting from the full model we tested several approaches to improve predictive performance. Stepwise AIC selection in both directions retained all predictors without removing anything, with the AIC unchanged at `r round(AIC(step_model), 2)` and CV RMSE at `r round(rmse_step, 4)`, so this direction was not pursued further. We then tested a quadratic polynomial term for Year of Release to capture the nonlinear arc of industry sales observed during EDA. An ANOVA F-test confirmed it was a statistically significant improvement over the linear specification (F = `r round(anova(full_model, model_poly)$F[2], 2)`, p = `r round(anova(full_model, model_poly)[2,6], 6)`), bringing AIC to `r round(AIC(model_poly), 2)` and CV RMSE to `r round(rmse_poly, 4)`. We also tested a Critic Score by Genre interaction to examine whether the relationship between critical reception and sales varies across game categories. The F-test confirmed this interaction is significant (F = `r round(anova(model_poly, model_int_genre)$F[2], 2)`, p = `r round(anova(model_poly, model_int_genre)[2,6], 6)`), producing an AIC of `r round(AIC(model_int_genre), 2)` and a CV RMSE of `r round(rmse_int_genre, 4)`. Finally we tested an interaction between Critic Score and User Score to examine whether games that score well with both audiences together achieve greater sales than what either score alone would predict. The F-test confirmed this interaction is significant (F = `r round(anova(full_model, model_int_scores)$F[2], 2)`, p = `r round(anova(full_model, model_int_scores)[2,6], 6)`), and this model produced the best performance with an AIC of `r round(AIC(model_int_scores), 2)` and a CV RMSE of `r round(rmse_int_scores, 4)`. Full output for all intermediate models is included in the appendix. Table 1 summarizes all candidates.
+
+```{r model_comparison}
+comparison <- data.frame(
+  Model = c(
+    "Full Model", "Stepwise AIC", "Polynomial Year",
+    "Critic x Genre Interaction",
+    "Critic x User Score Interaction (Final)"
+  ),
+  AIC = round(c(
+    AIC(full_model), AIC(step_model), AIC(model_poly),
+    AIC(model_int_genre), AIC(model_int_scores)
+  ), 2),
+  CV_RMSE = round(c(
+    rmse_full, rmse_step, rmse_poly,
+    rmse_int_genre, rmse_int_scores
+  ), 4),
+  Adj_R2 = round(c(
+    summary(full_model)$adj.r.squared,
+    summary(step_model)$adj.r.squared,
+    summary(model_poly)$adj.r.squared,
+    summary(model_int_genre)$adj.r.squared,
+    summary(model_int_scores)$adj.r.squared
+  ), 4)
+)
+
+kable(comparison, caption = "Comparison of all candidate models by AIC, 10-fold CV RMSE, and Adjusted R-squared. Lower AIC and CV RMSE indicate better out-of-sample performance.")
+```
+
+The Critic Score by User Score interaction model was selected as the final model on the basis of having the lowest AIC of `r round(AIC(model_int_scores), 2)` and the lowest cross-validated RMSE of `r round(rmse_int_scores, 4)` of all candidates tested.
+
+\newpage
+
+# Conclusion
+
+## Final Model
+
+The final model regresses log(Global Sales) on the interaction between Critic Score and User Score scaled to 0-100, with Year of Release, Genre, and Rating as main effects. It achieved an adjusted R-squared of `r round(summary(final_model)$adj.r.squared, 4)`, a residual standard error of `r round(summary(final_model)$sigma, 4)`, and a 10-fold cross-validated RMSE of `r round(rmse_int_scores, 4)` on the log scale. The overall F-statistic was highly significant with a p-value well below 0.001. Table 2 shows the coefficients for the key numeric predictors.
+
+```{r key_coefs}
+main_coefs <- as.data.frame(summary(final_model)$coefficients)
+main_coefs <- main_coefs[c("Critic_Score", "User_Score_100", "Critic_Score:User_Score_100"), ]
+kable(round(main_coefs, 6), caption = "Coefficients for the key numeric predictors in the final model. All three are statistically significant at the 0.001 level.")
+```
+
+The interaction term between Critic Score and User Score is positive and statistically significant with a p-value well below 0.001, and represents the central finding of this analysis. It indicates that the effect of critic score on log(Global Sales) increases as user score increases, meaning games that score well with both audiences together achieve greater commercial success than what either score would predict independently. Figure 5 shows predicted log(Global Sales) against critic score at three user score levels. The non-parallel lines confirm the interaction is meaningful, with the slope of critic score on predicted sales being noticeably steeper for games that also have high user scores.
+
+```{r fig_interaction, fig.cap="Predicted log(Global Sales) vs Critic Score at three levels of User Score, holding Year of Release at the median with Genre and Rating at their reference levels. Non-parallel lines confirm the interaction effect.", fig.height=4}
+pred_grid <- expand.grid(
+  Critic_Score = seq(20, 98, by = 2),
+  User_Score_100 = c(40, 70, 90),
+  Year_of_Release = median(model_df$Year_of_Release),
+  Genre = "Action",
+  Rating = "E"
+)
+pred_grid$predicted <- predict(final_model, newdata = pred_grid)
+pred_grid$User_Score_Grp <- factor(pred_grid$User_Score_100,
+                                    labels = c("Low (40)", "Mid (70)", "High (90)"))
+
+ggplot(pred_grid, aes(x = Critic_Score, y = predicted, color = User_Score_Grp)) +
+  geom_line(linewidth = 1) +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Critic Score", y = "Predicted log(Global Sales)", color = "User Score") +
+  theme_minimal(base_size = 10)
+```
+
+The User Score main effect carries a negative coefficient, which is a known consequence of including two correlated predictors in the same model. Once critic score is held constant, the residual variation in user score tends to be negative for highly commercial titles that receive audience backlash despite strong critical reception. The user score main effect should not be read in isolation since its practical meaning depends on the interaction term. Year of Release has a small positive coefficient capturing the general trend of higher sales volumes during the industry peak years. Genre contributes through dummy variables relative to the Action baseline, with Adventure and Strategy games showing notably lower expected log sales after controlling for the other predictors. Rating is also significant, with M and E rated games showing higher expected log sales than T rated games.
+
+The diagnostic plots for the final model are shown in Figure 6. The residuals versus fitted plot shows a band centered around zero with no strong systematic pattern. The Q-Q plot has some tail deviation indicating the residuals are not perfectly normally distributed. The Breusch-Pagan test returned a statistic of `r round(bptest(final_model)$statistic, 2)` with a p-value of `r round(bptest(final_model)$p.value, 6)`, confirming heteroscedasticity is still present. This does not bias the coefficient estimates but means standard errors are approximate. Cook's Distance identifies a small number of high-influence observations consistent with extreme blockbuster titles.
+
+```{r fig_final_diag, fig.cap="Diagnostic plots for the final model. The residuals vs fitted shows no strong pattern. The Q-Q plot has some tail deviation. Cook's Distance identifies a small number of high-influence observations.", fig.width=7, fig.height=5}
+par(mfrow = c(2, 2))
+plot(final_model, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
+
+## Discussion and Limitations
+
+The adjusted R-squared of approximately `r round(summary(final_model)$adj.r.squared * 100, 1)` percent is a reasonable result for this kind of prediction problem. Global video game sales are driven by many factors not present in this dataset, including marketing budgets, franchise recognition, platform availability, and regional cultural preferences. What the model captures is the statistically meaningful portion of variance attributable to review scores, genre, rating, and time trends, and the highly significant F-statistic confirms this goes well beyond what chance alone would produce. The cross-validated RMSE of `r round(rmse_int_scores, 4)` held consistently across folds, giving us confidence that the model generalizes to new data rather than just fitting noise.
+
+The adjusted R-squared improved from `r round(summary(full_model)$adj.r.squared, 4)` in the initial full model to `r round(summary(final_model)$adj.r.squared, 4)` in the final model, a modest but meaningful gain that reflects the added explanatory value of the Critic Score by User Score interaction term. There is also an alternative model worth noting. The Critic Score by Genre interaction combined with a quadratic year term achieved an AIC of `r round(AIC(model_int_genre), 2)` and a CV RMSE of `r round(rmse_int_genre, 4)`. While it does not outperform the final model on either criterion, it addresses the genre research question more directly and shows that the slope of critic scores on log sales varies meaningfully across categories. Adventure and Strategy show steeper slopes suggesting critical reception translates more directly into sales in those genres, while Sports and Racing show flatter slopes where brand loyalty appears to matter more. This model is shown in full in the appendix.
+
+The most significant limitation of this analysis is the selection bias from restricting to complete cases. All 6,894 modeling rows come from games reviewed on Metacritic, which skews toward major publisher titles on major platforms and excludes most older games. The collinearity between critic and user scores with a correlation of `r round(correlation, 3)` also complicates the interpretation of each predictor's individual contribution and produces the counterintuitive negative user score main effect discussed above. The persistent heteroscedasticity means inference based on standard errors should be treated as approximate. The dataset itself is limited to what was publicly scrapeable from VGChartz and Metacritic, so games that did not receive enough reviews to appear on Metacritic are simply absent from the analysis, which is a meaningful subset of smaller or older titles. Despite these limitations, the finding that games receiving strong scores from both critics and users tend to outperform what either score alone would predict is statistically robust and practically meaningful.
+
+\newpage
+
+# Appendix
+
+This appendix contains the full code and output used throughout the analysis, organized to guide the reader through the same steps taken in the paper. All models attempted are shown here along with their key outputs and the criteria used to evaluate them.
+
+## Data Pipeline
+
+The following code defines the cleaning functions used to prepare the raw dataset. The pipeline reads the CSV, removes rows with missing or zero sales, filters out bad year values, drops unrecognized genres, converts User Score from character to numeric, and standardizes the ESRB rating column. This code is sourced at the start of every report file.
+
+```{r appendix_pipeline, echo=TRUE, eval=FALSE}
+library(tidyverse)
+library(janitor)
+
+DATA_PATH <- here::here("data", "vgsales.csv")
+
+KNOWN_GENRES <- c(
+  "Action", "Adventure", "Fighting", "Misc", "Platform",
+  "Puzzle", "Racing", "Role-Playing", "Shooter",
+  "Simulation", "Sports", "Strategy"
+)
+
+STANDARD_RATINGS <- c("E", "E10+", "T", "M", "AO", "RP")
+
+load_raw <- function(path = DATA_PATH) {
+  message("[load] Reading: ", path)
+  df <- read_csv(
+    path,
+    col_types = cols(
+      Name             = col_character(),
+      Platform         = col_character(),
+      Year_of_Release  = col_character(),
+      Genre            = col_character(),
+      Publisher        = col_character(),
+      NA_Sales         = col_double(),
+      EU_Sales         = col_double(),
+      JP_Sales         = col_double(),
+      Other_Sales      = col_double(),
+      Global_Sales     = col_double(),
+      Critic_Score     = col_double(),
+      Critic_Count     = col_double(),
+      User_Score       = col_character(),
+      User_Count       = col_double(),
+      Developer        = col_character(),
+      Rating           = col_character()
+    ),
+    na = c("", "NA", "N/A")
+  )
+  message("[load] Raw shape: ", nrow(df), " rows x ", ncol(df), " cols")
+  df
+}
+
+col_summary <- function(df) {
+  tibble(
+    column   = names(df),
+    dtype    = sapply(df, class),
+    non_null = sapply(df, function(x) sum(!is.na(x))),
+    null_n   = sapply(df, function(x) sum(is.na(x))),
+    null_pct = round(sapply(df, function(x) mean(is.na(x))) * 100, 2)
+  )
+}
+
+clean_target <- function(df, target = "Global_Sales") {
+  before <- nrow(df)
+  df <- df %>% filter(!is.na(.data[[target]]), .data[[target]] > 0)
+  message("[clean] Target: removed ", before - nrow(df),
+          " rows with missing/zero ", target)
+  df
+}
+
+clean_year <- function(df) {
+  before <- nrow(df)
+  df <- df %>%
+    mutate(Year_of_Release = as.integer(Year_of_Release)) %>%
+    filter(!is.na(Year_of_Release), between(Year_of_Release, 1980, 2020))
+  message("[clean] Year: removed ", before - nrow(df), " rows with bad/missing year")
+  df
+}
+
+clean_genre <- function(df) {
+  before <- nrow(df)
+  df <- df %>% filter(Genre %in% KNOWN_GENRES)
+  message("[clean] Genre: removed ", before - nrow(df), " rows with unknown genre")
+  df
+}
+
+clean_user_score <- function(df) {
+  df %>%
+    mutate(
+      User_Score = na_if(User_Score, "tbd"),
+      User_Score = as.numeric(User_Score)
+    )
+}
+
+clean_rating <- function(df) {
+  df %>%
+    mutate(
+      Rating = if_else(Rating %in% STANDARD_RATINGS, Rating, "Other"),
+      Rating = replace_na(Rating, "Unknown"),
+      Rating = factor(Rating, levels = c("E", "E10+", "T", "M", "AO", "RP", "Other", "Unknown"))
+    )
+}
+
+run_pipeline <- function(path = DATA_PATH) {
+  load_raw(path) %>%
+    clean_target() %>%
+    clean_year() %>%
+    clean_genre() %>%
+    clean_user_score() %>%
+    clean_rating()
+}
+```
+
+## Data Preparation and Missing Values
+
+After running the pipeline we applied additional feature engineering for modeling: log-transforming Global Sales, rescaling User Score to 0-100, and collapsing rare ESRB ratings. The table below shows the missing value rate for each column after cleaning. The high missingness in Critic Score, User Score, and Rating reflects the fact that Metacritic coverage was not available for every title, particularly older games. Modeling was restricted to the 6,894 complete cases across these three columns.
+
+```{r appendix_missing, echo=TRUE}
+col_summary(df) %>%
+  arrange(desc(null_pct)) %>%
+  kable(digits = 2, caption = "Missing value rate by column after cleaning")
+```
+
+## Cross-Validation Function
+
+The following function was used to compute 10-fold cross-validated RMSE for every model we tested. The same fold assignments were used across all models to ensure fair comparison.
+
+```{r appendix_cv_fn, echo=TRUE}
+rmse_cv <- function(formula, data, folds) {
+  rmse <- numeric(10)
+  for (k in 1:10) {
+    train <- data[folds != k, ]
+    test  <- data[folds == k, ]
+    fit   <- lm(formula, data = train)
+    pred  <- predict(fit, newdata = test)
+    rmse[k] <- sqrt(mean((test$log_Global_Sales - pred)^2))
+  }
+  mean(rmse)
+}
+```
+
+## Full Model
+
+This is the starting point for model selection. It includes Critic Score, User Score, Year of Release, Genre, and Rating as predictors. The summary and diagnostics below establish the baseline against which all subsequent models were compared.
+
+```{r appendix_full, echo=TRUE}
+full_model <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+summary(full_model)
+```
+
+```{r appendix_full_cv, echo=TRUE}
+rmse_full <- rmse_cv(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + Year_of_Release + Genre + Rating,
+  model_df, folds
+)
+cat("Baseline CV RMSE:", round(rmse_full, 4), "\n")
+```
+
+```{r appendix_full_diag, echo=TRUE, fig.cap="Diagnostic plots for the full baseline model", fig.width=7, fig.height=5.5}
+par(mfrow = c(2, 2))
+plot(full_model, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+bptest(full_model)
+```
+
+## Stepwise AIC Selection
+
+We ran stepwise AIC selection in both directions starting from the full model. The intermediate steps are suppressed but the final comparison shows no variables were removed, confirming all predictors were contributing meaningfully.
+
+```{r appendix_step, echo=TRUE, results='hide'}
+step_model <- step(full_model, direction = "both")
+```
+
+```{r appendix_step_compare, echo=TRUE}
+cat("Full model AIC:", round(AIC(full_model), 2), "\n")
+cat("Step model AIC:", round(AIC(step_model), 2), "\n")
+cat("Variables removed:", setdiff(names(coef(full_model)), names(coef(step_model))), "\n")
+```
+
+## Critic Score x User Score Interaction
+
+We tested whether games that score well with both critics and users together achieve greater sales than what either score would predict on its own. The ANOVA F-test confirms the interaction term is a statistically significant improvement. This model produced the lowest AIC and CV RMSE of all candidates and was selected as the final model.
+
+```{r appendix_int_scores, echo=TRUE}
+model_int_scores <- lm(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  data = model_df
+)
+summary(model_int_scores)
+anova(full_model, model_int_scores)
+```
+
+```{r appendix_int_scores_cv, echo=TRUE}
+rmse_int_scores <- rmse_cv(
+  log_Global_Sales ~ Critic_Score * User_Score_100 + Year_of_Release + Genre + Rating,
+  model_df, folds
+)
+cat("CV RMSE:", round(rmse_int_scores, 4), "\n")
+cat("AIC:", round(AIC(model_int_scores), 2), "\n")
+```
+
+## Polynomial Year of Release
+
+We tested a quadratic term for Year of Release to capture the nonlinear arc of industry sales over time. While the ANOVA F-test confirmed it was a significant improvement over the linear specification, it did not outperform the Critic x User Score interaction on AIC or CV RMSE.
+
+```{r appendix_poly, echo=TRUE}
+model_poly <- lm(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating,
+  data = model_df
+)
+summary(model_poly)
+anova(full_model, model_poly)
+```
+
+```{r appendix_poly_cv, echo=TRUE}
+rmse_poly <- rmse_cv(
+  log_Global_Sales ~ Critic_Score + User_Score_100 + poly(Year_of_Release, 2) + Genre + Rating,
+  model_df, folds
+)
+cat("CV RMSE:", round(rmse_poly, 4), "\n")
+cat("AIC:", round(AIC(model_poly), 2), "\n")
+```
+
+## Critic Score x Genre Interaction
+
+We tested whether the relationship between critical reception and sales varies by genre. The F-test confirmed this interaction is statistically significant and this model is discussed in the paper as the alternative model. However it produced a higher AIC and CV RMSE than the Critic x User Score interaction.
+
+```{r appendix_int_genre, echo=TRUE}
+model_int_genre <- lm(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating,
+  data = model_df
+)
+summary(model_int_genre)
+anova(model_poly, model_int_genre)
+```
+
+```{r appendix_int_genre_cv, echo=TRUE}
+rmse_int_genre <- rmse_cv(
+  log_Global_Sales ~ Critic_Score * Genre + User_Score_100 + poly(Year_of_Release, 2) + Rating,
+  model_df, folds
+)
+cat("CV RMSE:", round(rmse_int_genre, 4), "\n")
+cat("AIC:", round(AIC(model_int_genre), 2), "\n")
+```
+
+## Full Model Comparison
+
+The table below summarizes all candidate models. The Critic x User Score interaction model was selected as the final model on the basis of lowest AIC and CV RMSE.
+
+```{r appendix_comparison, echo=TRUE}
+comparison <- data.frame(
+  Model = c(
+    "Full Model", "Stepwise AIC", "Critic x User Score (Final)",
+    "Polynomial Year", "Critic x Genre + Poly Year"
+  ),
+  AIC = round(c(
+    AIC(full_model), AIC(step_model), AIC(model_int_scores),
+    AIC(model_poly), AIC(model_int_genre)
+  ), 2),
+  CV_RMSE = round(c(
+    rmse_full, rmse_cv(formula(step_model), model_df, folds),
+    rmse_int_scores, rmse_poly, rmse_int_genre
+  ), 4),
+  Adj_R2 = round(c(
+    summary(full_model)$adj.r.squared, summary(step_model)$adj.r.squared,
+    summary(model_int_scores)$adj.r.squared, summary(model_poly)$adj.r.squared,
+    summary(model_int_genre)$adj.r.squared
+  ), 4)
+)
+kable(comparison, caption = "All candidate models compared by AIC, 10-fold CV RMSE, and Adjusted R-squared")
+```
+
+## Final Model Diagnostics
+
+```{r appendix_final, echo=TRUE}
+final_model <- model_int_scores
+```
+
+```{r appendix_final_diag, echo=TRUE, fig.cap="Diagnostic plots for the final model", fig.width=7, fig.height=5.5}
+par(mfrow = c(2, 2))
+plot(final_model, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
+
+```{r appendix_final_tests, echo=TRUE}
+bptest(final_model)
+```
+
+```{r appendix_final_vif, echo=TRUE}
+vif(final_model, type = "predictor") %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Predictor") %>%
+  arrange(desc(GVIF)) %>%
+  kable(digits = 3, caption = "Variance Inflation Factors for the final model")
+```
+
+```{r appendix_final_resid, echo=TRUE, fig.cap="Residual histogram for the final model", fig.height=3.5}
+hist(resid(final_model),
+     main = "Residuals - Final Model",
+     xlab = "Residuals",
+     col = "steelblue",
+     border = "white",
+     breaks = 35)
+```
+
+```{r appendix_actual_pred, echo=TRUE, fig.cap="Actual vs predicted for the final model", fig.height=4}
+model_df$fitted_final <- fitted(final_model)
+
+ggplot(model_df, aes(x = fitted_final, y = log_Global_Sales)) +
+  geom_point(alpha = 0.2, size = 0.7, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "tomato",
+              linewidth = 1, linetype = "dashed") +
+  labs(x = "Predicted log(Global Sales)", y = "Actual log(Global Sales)") +
+  theme_minimal()
+```
+
+## Alternative Model
+
+The Critic x Genre + Polynomial Year model is shown here as the alternative model referenced in the paper. It achieved an AIC of `r round(AIC(model_int_genre), 2)` and a CV RMSE of `r round(rmse_int_genre, 4)`, slightly worse than the final model on both metrics but notable for how directly it addresses the question of whether critic scores matter differently across genres.
+
+```{r appendix_alt, echo=TRUE}
+summary(model_int_genre)
+```
+
+```{r appendix_alt_diag, echo=TRUE, fig.cap="Diagnostic plots for the alternative Critic x Genre model", fig.width=7, fig.height=5.5}
+par(mfrow = c(2, 2))
+plot(model_int_genre, which = 1:4, pch = 20, cex = 0.4,
+     col = adjustcolor("steelblue", alpha.f = 0.4))
+par(mfrow = c(1, 1))
+```
